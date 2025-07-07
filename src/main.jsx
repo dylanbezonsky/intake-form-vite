@@ -9,3 +9,9 @@ root.render(
     <App />
   </ErrorBoundary>
 );
+
+window.onerror = function (msg, url, lineNo, columnNo, error) {
+  console.error('Global Error:', msg, error);
+};
+
+
