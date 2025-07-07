@@ -2,8 +2,12 @@
   "formTitle": "Patient Intake Form",
   "nameLabel": "Name",
   "saveButton": "Save Offline",
+<<<<<<< HEAD
   "savedAlert": "Saved offline!",
   "speak": "Speak",
   "listening": "Listening…",
   "speechUnsupported": "Speech recognition is not supported in this browser."
+=======
+  "savedAlert": "Saved offline!"
+>>>>>>> 85384ef288867ca1492a340dc0779ef22daec69c
 }

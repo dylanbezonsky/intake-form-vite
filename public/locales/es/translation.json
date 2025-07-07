@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "formTitle": "Formulario de Ingreso del Paciente",
   "nameLabel": "Nombre",
   "saveButton": "Guardar sin conexión",
@@ -6,4 +7,10 @@
   "speak": "Hablar",
   "listening": "Escuchando…",
   "speechUnsupported": "El reconocimiento de voz no es compatible con este navegador."
+=======
+  "formTitle": "Formulario de Ingreso de Pacientes",
+  "nameLabel": "Nombre",
+  "saveButton": "Guardar sin conexión",
+  "savedAlert": "¡Guardado sin conexión!"
+>>>>>>> 85384ef288867ca1492a340dc0779ef22daec69c
 }
