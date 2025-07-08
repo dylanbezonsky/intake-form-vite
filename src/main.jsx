@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import ErrorBoundary from './components/ErrorBoundary';
 import LoadingSpinner from './components/LoadingSpinner';
-import reportWebVitals from './reportWebVitals';
+
 
 // Initialize i18n before app starts
 import './i18n';
@@ -186,16 +186,6 @@ if (import.meta.env.PROD && import.meta.env.VITE_ANALYTICS_ID) {
   initializeAnalytics(import.meta.env.VITE_ANALYTICS_ID);
 }
 
-// Web Vitals collection
-reportWebVitals((metric) => {
-  if (import.meta.env.DEV) {
-    console.log('📊 Web Vital:', metric);
-  } else {
-    // Send to analytics service
-    sendMetricToAnalytics(metric);
-  }
-});
-
 // ================================
 // HELPER FUNCTIONS
 // ================================
@@ -323,5 +313,4 @@ if (import.meta.env.DEV || import.meta.env.MODE === 'test') {
   };
   console.log('🧪 Test utilities available at window.__APP_TEST_UTILS__');
 
-  reportWebVitals(console.log);
 }

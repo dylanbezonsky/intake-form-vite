@@ -5,5 +5,9 @@
   "savedAlert": "Saved offline!",
   "speak": "Speak",
   "listening": "Listening…",
-  "speechUnsupported": "Speech recognition is not supported in this browser."
+  "speechUnsupported": "Speech recognition is not supported in this browser.",
+  "appTitle": "Medical Intake System",
+  "dataManagement": "Data Management",
+  "switchToEnglish": "Switch to English",
+  "switchToSpanish": "Cambiar a Español"
 }
