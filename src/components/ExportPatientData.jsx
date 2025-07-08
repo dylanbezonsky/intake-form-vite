@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { loadAllPatients, countPatients } from '../storage';
 
 const ExportPatientData = () => {
   const { t } = useTranslation();
@@ -7,22 +8,33 @@ const ExportPatientData = () => {
     isExporting: false,
     availableRecords: 0,
     lastExport: null,
-    error: null
+    error: null,
+    isLoading: true
   });
 
   // Count available records on mount and update
   useEffect(() => {
-    const countRecords = () => {
-      const patientKeys = Object.keys(localStorage).filter(key => 
-        key.startsWith('patient-')
-      );
-      setState(prev => ({ ...prev, availableRecords: patientKeys.length }));
+    const loadRecordCount = async () => {
+      try {
+        setState(prev => ({ ...prev, isLoading: true }));
+        const count = await countPatients();
+        setState(prev => ({ 
+          ...prev, 
+          availableRecords: count,
+          isLoading: false 
+        }));
+      } catch (error) {
+        console.error('Failed to count patients:', error);
+        setState(prev => ({ 
+          ...prev, 
+          availableRecords: 0,
+          isLoading: false,
+          error: 'Failed to load patient count'
+        }));
+      }
     };
 
-    countRecords();
-    // Re-count if localStorage changes (though this is basic)
-    window.addEventListener('storage', countRecords);
-    return () => window.removeEventListener('storage', countRecords);
+    loadRecordCount();
   }, []);
 
   // Auto-clear success state after 5 seconds
@@ -36,7 +48,7 @@ const ExportPatientData = () => {
   }, [state.lastExport]);
 
   // Validate individual patient record
-  const validatePatientRecord = (record, key) => {
+  const validatePatientRecord = (record, patientId) => {
     if (!record || typeof record !== 'object') {
       return { isValid: false, error: 'invalidFormat' };
     }
@@ -46,25 +58,20 @@ const ExportPatientData = () => {
       return { isValid: false, error: 'missingId' };
     }
 
-    if (!record.name || typeof record.name !== 'string' || record.name.trim() === '') {
+    // For App.jsx structure, check patientInfo nested object
+    const patientInfo = record.patientInfo || record;
+    
+    if (!patientInfo.name || typeof patientInfo.name !== 'string' || patientInfo.name.trim() === '') {
       return { isValid: false, error: 'missingName' };
     }
 
-    if (!record.dateCreated || typeof record.dateCreated !== 'string' || record.dateCreated.trim() === '') {
+    if (!record.createdAt && !record.dateCreated) {
       return { isValid: false, error: 'missingDateCreated' };
     }
 
-    // Validate ID format (alphanumeric)
-    if (!/^[a-zA-Z0-9]+$/.test(record.id.trim())) {
+    // Validate ID format (allow more flexible format for UUIDs)
+    if (!/^[a-zA-Z0-9\-_]+$/.test(record.id.trim())) {
       return { isValid: false, error: 'invalidIdFormat' };
-    }
-
-    // Optional fields validation (if present)
-    const optionalFields = ['notes', 'language', 'gender'];
-    for (const field of optionalFields) {
-      if (record[field] !== undefined && typeof record[field] !== 'string') {
-        return { isValid: false, error: `invalid${field.charAt(0).toUpperCase() + field.slice(1)}Format` };
-      }
     }
 
     return { isValid: true, record };
@@ -113,16 +120,15 @@ const ExportPatientData = () => {
     setState(prev => ({ ...prev, isExporting: true, error: null }));
 
     try {
-      // Get all patient keys
-      const patientKeys = Object.keys(localStorage).filter(key =>
-        key.startsWith('patient-')
-      );
+      // Load all patient data using new storage system
+      const allPatients = await loadAllPatients();
+      const patientEntries = Object.entries(allPatients);
 
       // Warn if approaching limits
-      if (patientKeys.length > 500) {
+      if (patientEntries.length > 500) {
         const proceedMessage = t('export.largeDatasetWarning', {
-          count: patientKeys.length,
-          defaultValue: `Warning: Exporting ${patientKeys.length} records. This may take a moment. Continue?`
+          count: patientEntries.length,
+          defaultValue: `Warning: Exporting ${patientEntries.length} records. This may take a moment. Continue?`
         });
         if (!window.confirm(proceedMessage)) {
           setState(prev => ({ ...prev, isExporting: false }));
@@ -134,26 +140,41 @@ const ExportPatientData = () => {
       const validPatients = [];
       const invalidRecords = [];
 
-      for (const key of patientKeys) {
+      for (const [patientId, patientData] of patientEntries) {
         try {
-          const rawData = localStorage.getItem(key);
-          if (!rawData) {
-            invalidRecords.push({ key, error: 'emptyData' });
+          if (!patientData) {
+            invalidRecords.push({ patientId, error: 'emptyData' });
             continue;
           }
 
-          const parsedData = JSON.parse(rawData);
-          const validation = validatePatientRecord(parsedData, key);
+          const validation = validatePatientRecord(patientData, patientId);
           
           if (validation.isValid) {
-            validPatients.push(validation.record);
+            // Ensure the exported record has the patient ID
+            const exportRecord = {
+              ...validation.record,
+              id: patientId,
+              // Flatten structure for easier import/export
+              ...(validation.record.patientInfo && {
+                name: validation.record.patientInfo.name,
+                age: validation.record.patientInfo.age,
+                gender: validation.record.patientInfo.gender,
+                symptoms: validation.record.patientInfo.symptoms
+              })
+            };
+            
+            validPatients.push(exportRecord);
           } else {
-            invalidRecords.push({ key, error: validation.error });
-            console.warn(`Invalid patient record ${key}:`, validation.error);
+            invalidRecords.push({ patientId, error: validation.error });
+            console.warn(`Invalid patient record ${patientId}:`, validation.error);
           }
-        } catch (parseError) {
-          invalidRecords.push({ key, error: 'parseError', details: parseError.message });
-          console.error(`Failed to parse ${key}:`, parseError);
+        } catch (processError) {
+          invalidRecords.push({ 
+            patientId, 
+            error: 'processError', 
+            details: processError.message 
+          });
+          console.error(`Failed to process ${patientId}:`, processError);
         }
       }
 
@@ -163,10 +184,18 @@ const ExportPatientData = () => {
           exportTimestamp: new Date().toISOString(),
           recordCount: validPatients.length,
           schemaVersion: '1.0',
-          totalAttempted: patientKeys.length,
-          invalidRecords: invalidRecords.length
+          totalAttempted: patientEntries.length,
+          invalidRecords: invalidRecords.length,
+          exportedBy: 'Medical Intake System',
+          storageSystem: 'IndexedDB'
         },
-        patients: validPatients
+        patients: validPatients,
+        ...(invalidRecords.length > 0 && {
+          exportWarnings: {
+            message: 'Some records were invalid and excluded from export',
+            invalidRecords: invalidRecords.map(({ patientId, error }) => ({ patientId, error }))
+          }
+        })
       };
 
       // Check file size before download
@@ -217,7 +246,7 @@ const ExportPatientData = () => {
           timestamp: new Date().toISOString(),
           validRecords: validPatients.length,
           invalidRecords: invalidRecords.length,
-          totalRecords: patientKeys.length,
+          totalRecords: patientEntries.length,
           fileSize: sizeInMB.toFixed(2)
         },
         error: null
@@ -229,6 +258,27 @@ const ExportPatientData = () => {
         ...prev,
         isExporting: false,
         error: error.message
+      }));
+    }
+  };
+
+  // Refresh record count manually
+  const handleRefreshCount = async () => {
+    try {
+      setState(prev => ({ ...prev, isLoading: true }));
+      const count = await countPatients();
+      setState(prev => ({ 
+        ...prev, 
+        availableRecords: count,
+        isLoading: false,
+        error: null
+      }));
+    } catch (error) {
+      console.error('Failed to refresh count:', error);
+      setState(prev => ({ 
+        ...prev, 
+        isLoading: false,
+        error: 'Failed to refresh patient count'
       }));
     }
   };
@@ -252,8 +302,17 @@ const ExportPatientData = () => {
       </p>
 
       {/* Record Count Display */}
-      <div style={{ marginBottom: '1rem', fontSize: '0.9rem', color: '#555' }}>
-        {state.availableRecords > 0 ? (
+      <div style={{ 
+        marginBottom: '1rem', 
+        fontSize: '0.9rem', 
+        color: '#555',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.5rem'
+      }}>
+        {state.isLoading ? (
+          <span>🔄 {t('export.loadingCount', { defaultValue: 'Loading patient count...' })}</span>
+        ) : state.availableRecords > 0 ? (
           <span>
             📊 {t('export.recordsAvailable', {
               count: state.availableRecords,
@@ -265,21 +324,38 @@ const ExportPatientData = () => {
             {t('export.noRecordsFound', { defaultValue: 'No patient records found' })}
           </span>
         )}
+        
+        <button
+          onClick={handleRefreshCount}
+          disabled={state.isLoading}
+          style={{
+            padding: '0.25rem 0.5rem',
+            fontSize: '0.75rem',
+            backgroundColor: '#f8f9fa',
+            border: '1px solid #dee2e6',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            color: '#495057'
+          }}
+          title={t('export.refreshTooltip', { defaultValue: 'Refresh patient count' })}
+        >
+          🔄
+        </button>
       </div>
 
       {/* Export Button */}
       <button 
         onClick={handleExport}
-        disabled={state.isExporting || state.availableRecords === 0}
+        disabled={state.isExporting || state.availableRecords === 0 || state.isLoading}
         style={{
           padding: '0.75rem 1.5rem',
-          backgroundColor: state.isExporting || state.availableRecords === 0 
+          backgroundColor: state.isExporting || state.availableRecords === 0 || state.isLoading
             ? '#ccc' 
             : '#007bff',
           color: 'white',
           border: 'none',
           borderRadius: '4px',
-          cursor: state.isExporting || state.availableRecords === 0 
+          cursor: state.isExporting || state.availableRecords === 0 || state.isLoading
             ? 'not-allowed' 
             : 'pointer',
           fontSize: '1rem',

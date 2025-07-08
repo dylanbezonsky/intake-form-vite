@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { savePatientData, loadPatientData, loadAllPatients } from '../storage';
 
 const ImportPatientData = () => {
   const { t } = useTranslation();
@@ -37,19 +38,20 @@ const ImportPatientData = () => {
       return { isValid: false, error: 'missingName', index, id: record.id };
     }
 
-    if (!record.dateCreated || typeof record.dateCreated !== 'string' || record.dateCreated.trim() === '') {
-      return { isValid: false, error: 'missingDateCreated', index, id: record.id };
+    // For imports, dateCreated is optional - we'll set it if missing
+    if (!record.dateCreated) {
+      record.dateCreated = new Date().toISOString();
     }
 
-    // Validate ID format (alphanumeric)
-    if (!/^[a-zA-Z0-9]+$/.test(record.id.trim())) {
+    // Validate ID format (alphanumeric, hyphens, underscores allowed for UUIDs)
+    if (!/^[a-zA-Z0-9\-_]+$/.test(record.id.trim())) {
       return { isValid: false, error: 'invalidIdFormat', index, id: record.id };
     }
 
     // Optional fields validation (if present)
-    const optionalFields = ['notes', 'language', 'gender'];
+    const optionalFields = ['notes', 'language', 'gender', 'age', 'symptoms'];
     for (const field of optionalFields) {
-      if (record[field] !== undefined && typeof record[field] !== 'string') {
+      if (record[field] !== undefined && typeof record[field] !== 'string' && typeof record[field] !== 'number') {
         return { isValid: false, error: `invalid${field.charAt(0).toUpperCase() + field.slice(1)}Format`, index, id: record.id };
       }
     }
@@ -57,20 +59,19 @@ const ImportPatientData = () => {
     return { isValid: true, record: { ...record }, index, id: record.id };
   };
 
-  // Check localStorage quota
-  const checkStorageQuota = (estimatedSize) => {
+  // Check storage quota using storage service
+  const checkStorageQuota = async () => {
     try {
-      // Rough localStorage usage check
-      const used = JSON.stringify(localStorage).length;
-      const availableEstimate = 5 * 1024 * 1024; // Assume ~5MB limit (varies by browser)
-      const usagePercent = (used / availableEstimate) * 100;
+      const stats = await loadAllPatients();
+      const recordCount = Object.keys(stats).length;
       
-      if (usagePercent > 80) {
+      // Warn if approaching reasonable limits
+      if (recordCount > 1000) {
         return {
           warning: true,
           message: t('import.storageWarning', {
-            percent: Math.round(usagePercent),
-            defaultValue: `Storage is ${Math.round(usagePercent)}% full. Import may fail.`
+            count: recordCount,
+            defaultValue: `Already have ${recordCount} records stored. Import may affect performance.`
           })
         };
       }
@@ -101,37 +102,55 @@ const ImportPatientData = () => {
       }));
     }
 
-    // Validate required structure
-    if (!parsedData.metadata || !parsedData.patients) {
-      throw new Error(t('import.invalidStructure', { 
-        defaultValue: 'File must contain metadata and patients sections.' 
-      }));
-    }
+    // Handle both new format (with metadata) and simple array format
+    let patients;
+    let metadata = null;
 
-    // Validate schema version
-    if (parsedData.metadata.schemaVersion !== '1.0') {
-      throw new Error(t('import.incompatibleSchema', {
-        version: parsedData.metadata.schemaVersion,
-        defaultValue: `Incompatible schema version: ${parsedData.metadata.schemaVersion}. Expected: 1.0`
+    if (Array.isArray(parsedData)) {
+      // Simple array format (legacy support)
+      patients = parsedData;
+      metadata = {
+        recordCount: patients.length,
+        schemaVersion: '1.0',
+        importTimestamp: new Date().toISOString()
+      };
+    } else if (parsedData.metadata && parsedData.patients) {
+      // New structured format
+      patients = parsedData.patients;
+      metadata = parsedData.metadata;
+      
+      // Validate schema version
+      if (metadata.schemaVersion && metadata.schemaVersion !== '1.0') {
+        console.warn(`Schema version mismatch: ${metadata.schemaVersion} vs 1.0`);
+      }
+    } else {
+      throw new Error(t('import.invalidStructure', { 
+        defaultValue: 'File must contain an array of patients or have metadata and patients sections.' 
       }));
     }
 
     // Validate patients array
-    if (!Array.isArray(parsedData.patients)) {
+    if (!Array.isArray(patients)) {
       throw new Error(t('import.invalidPatientsArray', { 
         defaultValue: 'Patients section must be an array.' 
       }));
     }
 
+    if (patients.length === 0) {
+      throw new Error(t('import.emptyFile', { 
+        defaultValue: 'No patient records found in file.' 
+      }));
+    }
+
     // Log metadata mismatches (but don't block)
-    if (parsedData.metadata.recordCount !== parsedData.patients.length) {
+    if (metadata.recordCount && metadata.recordCount !== patients.length) {
       console.warn('Metadata record count mismatch:', {
-        expected: parsedData.metadata.recordCount,
-        actual: parsedData.patients.length
+        expected: metadata.recordCount,
+        actual: patients.length
       });
     }
 
-    return parsedData;
+    return { patients, metadata };
   };
 
   // Handle file selection
@@ -176,7 +195,7 @@ const ImportPatientData = () => {
     reader.onload = (e) => {
       try {
         const content = e.target.result;
-        const parsedData = JSON.parse(content);
+        const { patients } = validateImportFile(content);
         
         setState(prev => ({
           ...prev,
@@ -184,7 +203,7 @@ const ImportPatientData = () => {
           fileInfo: {
             name: file.name,
             size: sizeInMB.toFixed(2),
-            recordCount: parsedData.patients ? parsedData.patients.length : 0,
+            recordCount: patients.length,
             hasWarning: sizeInMB > 10
           },
           error: null
@@ -200,7 +219,7 @@ const ImportPatientData = () => {
             hasWarning: true
           },
           error: t('import.previewError', { 
-            defaultValue: 'Could not preview file contents.' 
+            defaultValue: 'Could not preview file contents. File may be invalid.' 
           })
         }));
       }
@@ -208,18 +227,26 @@ const ImportPatientData = () => {
     reader.readAsText(file);
   };
 
-  // Check for existing patient IDs
-  const checkForConflicts = (patients) => {
+  // Check for existing patient IDs using storage service
+  const checkForConflicts = async (patients) => {
     const conflicts = [];
-    const existingKeys = Object.keys(localStorage).filter(key => 
-      key.startsWith('patient-')
-    );
     
-    patients.forEach((patient, index) => {
-      if (existingKeys.includes(`patient-${patient.id}`)) {
-        conflicts.push({ index, id: patient.id, name: patient.name });
+    try {
+      // Check each patient ID against storage
+      for (const patient of patients) {
+        const existingPatient = await loadPatientData(patient.id);
+        if (existingPatient) {
+          conflicts.push({ 
+            id: patient.id, 
+            name: patient.name,
+            existingName: existingPatient.name || existingPatient.patientInfo?.name || 'Unknown'
+          });
+        }
       }
-    });
+    } catch (error) {
+      console.warn('Error checking for conflicts:', error);
+      // Continue without conflict checking if storage fails
+    }
     
     return conflicts;
   };
@@ -246,11 +273,10 @@ const ImportPatientData = () => {
       });
 
       // Validate file structure and content
-      const importData = validateImportFile(fileContent);
-      const { patients, metadata } = importData;
+      const { patients, metadata } = validateImportFile(fileContent);
 
       // Check storage quota
-      const storageCheck = checkStorageQuota(fileContent.length);
+      const storageCheck = await checkStorageQuota();
       if (storageCheck.warning) {
         if (!window.confirm(storageCheck.message + ' Continue?')) {
           setState(prev => ({ ...prev, isImporting: false }));
@@ -270,13 +296,19 @@ const ImportPatientData = () => {
       }
 
       // Check for conflicts
-      const conflicts = checkForConflicts(patients);
+      const conflicts = await checkForConflicts(patients);
       let overwriteAll = false;
 
       if (conflicts.length > 0) {
+        const conflictDetails = conflicts.slice(0, 3).map(c => 
+          `• ${c.id}: "${c.name}" → "${c.existingName}"`
+        ).join('\n');
+        const moreText = conflicts.length > 3 ? `\n...and ${conflicts.length - 3} more` : '';
+        
         const overwriteMessage = t('import.overwriteConfirm', {
           count: conflicts.length,
-          defaultValue: `${conflicts.length} existing records will be replaced. Continue?`
+          details: conflictDetails + moreText,
+          defaultValue: `${conflicts.length} existing records will be replaced:\n${conflictDetails}${moreText}\n\nContinue?`
         });
         
         overwriteAll = window.confirm(overwriteMessage);
@@ -286,7 +318,7 @@ const ImportPatientData = () => {
         }
       }
 
-      // Process all records
+      // Process all records using storage service
       const results = {
         attempted: patients.length,
         imported: 0,
@@ -298,55 +330,86 @@ const ImportPatientData = () => {
       const importTimestamp = new Date().toISOString();
       const importSource = state.selectedFile.name;
 
-      patients.forEach((patient, index) => {
-        const validation = validatePatientRecord(patient, index);
+      // Process patients in batches to avoid overwhelming the storage
+      const batchSize = 10;
+      for (let i = 0; i < patients.length; i += batchSize) {
+        const batch = patients.slice(i, i + batchSize);
         
-        if (!validation.isValid) {
-          results.skipped++;
-          results.skippedRecords.push({
-            id: validation.id,
-            index: validation.index,
-            error: validation.error
-          });
-          console.warn(`Skipping invalid patient record at index ${index}:`, validation.error);
-          return;
-        }
-
-        // Prepare record for storage
-        const recordToStore = {
-          ...validation.record,
-          lastImported: importTimestamp,
-          importSource: importSource
-        };
-
-        // Remove any unexpected fields (security measure)
-        const allowedFields = ['id', 'name', 'dateCreated', 'notes', 'language', 'gender', 'lastImported', 'importSource'];
-        const cleanedRecord = {};
-        allowedFields.forEach(field => {
-          if (recordToStore[field] !== undefined) {
-            cleanedRecord[field] = recordToStore[field];
+        await Promise.allSettled(batch.map(async (patient, batchIndex) => {
+          const actualIndex = i + batchIndex;
+          const validation = validatePatientRecord(patient, actualIndex);
+          
+          if (!validation.isValid) {
+            results.skipped++;
+            results.skippedRecords.push({
+              id: validation.id,
+              index: validation.index,
+              error: validation.error
+            });
+            console.warn(`Skipping invalid patient record at index ${actualIndex}:`, validation.error);
+            return;
           }
-        });
 
-        const storageKey = `patient-${cleanedRecord.id}`;
-        const existed = localStorage.getItem(storageKey) !== null;
+          try {
+            // Check if patient exists
+            const existingPatient = await loadPatientData(validation.record.id);
+            const existed = !!existingPatient;
 
-        try {
-          localStorage.setItem(storageKey, JSON.stringify(cleanedRecord));
-          results.imported++;
-          if (existed) {
-            results.overwritten++;
+            // Prepare record for storage - preserve structure for different formats
+            let recordToStore;
+            
+            if (validation.record.patientInfo) {
+              // App.jsx format with patientInfo wrapper
+              recordToStore = {
+                ...validation.record,
+                metadata: {
+                  ...validation.record.metadata,
+                  lastImported: importTimestamp,
+                  importSource: importSource
+                }
+              };
+            } else {
+              // Direct patient data format
+              recordToStore = {
+                id: validation.record.id,
+                createdAt: validation.record.createdAt || validation.record.dateCreated || importTimestamp,
+                updatedAt: importTimestamp,
+                patientInfo: {
+                  name: validation.record.name,
+                  age: validation.record.age || '',
+                  gender: validation.record.gender || '',
+                  symptoms: validation.record.symptoms || validation.record.notes || '',
+                  ...validation.record
+                },
+                metadata: {
+                  version: 1,
+                  lastModifiedBy: 'import-system',
+                  lastImported: importTimestamp,
+                  importSource: importSource,
+                  originalFormat: 'import'
+                }
+              };
+            }
+
+            // Save using storage service
+            await savePatientData(validation.record.id, recordToStore);
+            
+            results.imported++;
+            if (existed) {
+              results.overwritten++;
+            }
+            
+          } catch (storageError) {
+            results.skipped++;
+            results.skippedRecords.push({
+              id: validation.record.id,
+              index: actualIndex,
+              error: 'storageError'
+            });
+            console.error(`Failed to store patient ${validation.record.id}:`, storageError);
           }
-        } catch (storageError) {
-          results.skipped++;
-          results.skippedRecords.push({
-            id: cleanedRecord.id,
-            index,
-            error: 'storageError'
-          });
-          console.error(`Failed to store patient ${cleanedRecord.id}:`, storageError);
-        }
-      });
+        }));
+      }
 
       // Clear file input on successful import
       if (fileInputRef.current) {
