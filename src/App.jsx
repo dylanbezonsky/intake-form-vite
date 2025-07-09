@@ -5,10 +5,12 @@ import { toast, ToastContainer } from 'react-toastify';
 import { v4 as uuidv4 } from 'uuid';
 import 'react-toastify/dist/ReactToastify.css';
 
-import { savePatientData, loadPatientData, getAllPatientIds } from './storage';
+import { SecureStorage } from './services/secureStorage';
 import ErrorBoundary from './components/ErrorBoundary';
 import ExportPatientData from './components/ExportPatientData';
 import ImportPatientData from './components/ImportPatientData';
+import Login from './components/Login';
+import Signup from './components/Signup';
 
 // Separate Components for Clean Architecture
 const LanguageSwitcher = ({ currentLanguage, onLanguageChange }) => {
@@ -88,6 +90,11 @@ function App() {
   const { t, i18n } = useTranslation();
   const formRef = useRef(null);
   
+// User Authentication State
+const [hasUsers, setHasUsers] = useState(false);
+const [isAuthenticated, setIsAuthenticated] = useState(false);
+const [currentUser, setCurrentUser] = useState(null);
+const [showSignup, setShowSignup] = useState(false);
   // State Management
   const [appState, setAppState] = useState({
     isLoading: false,
@@ -139,13 +146,46 @@ function App() {
     console.error('App Error:', errorEntry);
   };
 
-  // Load all patient IDs on app start
+// Check if any users exist on app start
+useEffect(() => {
+  const checkUserStatus = () => {
+    const storedUsers = JSON.parse(localStorage.getItem('registered_users') || '{}');
+    const userCount = Object.keys(storedUsers).length;
+    setHasUsers(userCount > 0);
+    setShowSignup(userCount === 0); // Show signup if no users exist
+  };
+  
+  checkUserStatus();
+}, []);
+
+// Login Handler
+const handleLogin = (userData) => {
+  setCurrentUser(userData);
+  SecureStorage.setCurrentPin(userData.password); // Use password for encryption
+  setIsAuthenticated(true);
+  toast.success(t('loginSuccess', { defaultValue: `Welcome back, ${userData.username}!` }));
+};
+
+// Signup Handler
+const handleSignup = (userData) => {
+  setCurrentUser(userData);
+  SecureStorage.setCurrentPin(userData.password); // Use password for encryption
+  setHasUsers(true);
+  setIsAuthenticated(true);
+  toast.success(t('accountCreated', { defaultValue: `Account created! Welcome, ${userData.username}!` }));
+};
+
+// Switch between login and signup
+const handleSwitchToSignup = () => setShowSignup(true);
+const handleSwitchToLogin = () => setShowSignup(false);
+  
+// Load all patient IDs on app start
   useEffect(() => {
     const loadAllPatients = async () => {
       setAppState(prev => ({ ...prev, isLoading: true }));
       
       try {
-        const patientIds = await getAllPatientIds();
+        const patientIds = await SecureStorage.getAllPatientIds();
         setAllPatients(patientIds);
         
         // Auto-select first patient if available
@@ -186,7 +226,7 @@ function App() {
         }
         
         // Load from storage
-        const savedData = await loadPatientData(currentPatientId);
+        const savedData = await SecureStorage.loadPatientData(currentPatientId);
         if (savedData) {
           setFormData(savedData.patientInfo || {});
           setPatientCache(prev => new Map(prev).set(currentPatientId, savedData));
@@ -273,7 +313,7 @@ function App() {
         }
       };
       
-      await savePatientData(currentPatientId, patientRecord);
+      await SecureStorage.savePatientData(currentPatientId, patientRecord);
       
       // Update cache
       setPatientCache(prev => new Map(prev).set(currentPatientId, patientRecord));
@@ -331,23 +371,65 @@ function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [appState.hasUnsavedChanges]);
 
+// Authentication Flow
+if (!hasUsers || showSignup) {
+  return (
+    <ErrorBoundary>
+      <Signup 
+        onSignup={handleSignup}
+        onSwitchToLogin={handleSwitchToLogin}
+      />
+    </ErrorBoundary>
+  );
+}
+
+if (!isAuthenticated) {
+  return (
+    <ErrorBoundary>
+      <Login 
+        onLogin={handleLogin}
+        onSwitchToSignup={handleSwitchToSignup}
+      />
+    </ErrorBoundary>
+  );
+}
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-100 p-4">
         <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-lg p-6">
           
-          {/* Header */}
-          <header className="border-b border-gray-200 pb-4 mb-6">
-            <div className="flex justify-between items-start">
+         {/* Header with Logout */}
+        <header className="border-b border-gray-200 pb-4 mb-6">
+          <div className="flex justify-between items-start">
+            <div>
               <h1 className="text-2xl font-bold text-gray-900">
                 {t('appTitle', { defaultValue: 'Medical Intake System' })}
               </h1>
+              {currentUser && (
+                <p className="text-sm text-gray-600 mt-1">
+                  Logged in as: <span className="font-medium">{currentUser.username}</span>
+                </p>
+              )}
+            </div>
+            <div className="flex items-center gap-4">
               <LanguageSwitcher 
                 currentLanguage={i18n.language}
                 onLanguageChange={handleLanguageChange}
               />
+              <button
+                onClick={() => {
+                  setIsAuthenticated(false);
+                  setCurrentUser(null);
+                  SecureStorage.setCurrentPin(null);
+                  toast.info(t('loggedOut', { defaultValue: 'Logged out successfully' }));
+                }}
+                className="text-sm text-gray-600 hover:text-gray-800 underline"
+              >
+                Logout
+              </button>
             </div>
-          </header>
+          </div>
+        </header>
 
           {/* Patient Selection */}
           <PatientSelector
